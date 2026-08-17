@@ -1,6 +1,6 @@
-# playwright-testrail-template
+# QA Automation Portfolio
 
-Python + Playwright 的 E2E 測試範本，整合 TestRail 結果回報、截圖／錄影附件與 Slack 通知。
+Python + Playwright 的 E2E 測試框架，整合 TestRail 結果回報、截圖／錄影附件與 Slack 通知。
 
 測試案例只需要寫「測試步驟」本身 —— 開瀏覽器、建立截圖目錄、錄影、統一錯誤處理、
 把結果連同截圖寫回 TestRail、以及執行進度通知，全部由框架處理。
