@@ -1,4 +1,5 @@
 playwright
-Pillow
-requests
-pyotp
+
+# Windows 與精簡版 Linux 映像沒有內建 IANA 時區資料庫，
+# zoneinfo 需要這個套件才能解析 RUN_TIMEZONE（例如 Asia/Taipei）。
+tzdata

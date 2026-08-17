@@ -38,22 +38,64 @@ from testrail_client import (
 
 # 路徑設定
 PROJECT_ROOT = Path(__file__).resolve().parent
-TEST_DIR = PROJECT_ROOT / "TEST"
+TEST_DIR = PROJECT_ROOT / "tests"
 
-# 執行模式
-RUN_MODE_MULTI = 2
-RUN_MODE_DAILY = 3
-
-# 專案預設值
-DEFAULT_MULTI_RUN_STRATEGY = "existing"
-DEFAULT_DAILY_RUN_STRATEGY = "new"
+# 沿用案例自己的 TEST_RUN_ID 時，若要改成固定回報到某一個既有 run，把 ID 填在這裡。
 DEFAULT_EXISTING_RUN_ID = 0
-DEFAULT_MULTI_RUN_NAME_PREFIX = "Automation Run"
-DEFAULT_DAILY_RUN_NAME_PREFIX = "Daily Auto Check"
-DEFAULT_TIMEZONE = "Asia/Taipei"
 
-# 命名輔助工具
+# 未設定 RUN_TIMEZONE 時，run 名稱的時間戳使用的時區。
+DEFAULT_TIMEZONE = "UTC"
+
+# 從檔名解析 case id，例如 test_case_c1234.py -> 1234。
 CASE_ID_PATTERN = re.compile(r"(?:^|[_-])c(\d+)", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class RunMode:
+    """一種批次執行模式。
+
+    兩種模式的差別只在「結果要回報到哪個 TestRail run」，
+    其餘流程（載入案例、逐支執行、Slack 進度、彙總通知）完全共用。
+    """
+
+    key: str
+    """TESTRAIL_RUN_MODE 的值。"""
+
+    strategy: str
+    """existing = 沿用每支案例自己的 TEST_RUN_ID；new = 每次建立一個新的 run。"""
+
+    cases_env: str
+    """案例清單的專用環境變數；未設定時退回共用的 TESTRAIL_TESTS。"""
+
+    run_name_prefix: str
+    """未指定 --name 時，自動產生的 run 名稱前綴。"""
+
+    label: str
+    """console log 顯示用的名稱。"""
+
+
+RUN_MODES: dict[str, RunMode] = {
+    "existing": RunMode(
+        key="existing",
+        strategy="existing",
+        cases_env="TESTRAIL_TESTS_EXISTING",
+        run_name_prefix="Automation Run",
+        label="existing-run",
+    ),
+    "new": RunMode(
+        key="new",
+        strategy="new",
+        cases_env="TESTRAIL_TESTS_NEW",
+        run_name_prefix="Daily Auto Check",
+        label="new-run",
+    ),
+}
+
+# 舊版設定用數字表示模式，保留對應關係以相容既有的 .env 與 CI 變數。
+LEGACY_RUN_MODES = {"2": "existing", "3": "new"}
+
+# 未指定專用清單時共用的案例清單變數。
+SHARED_CASES_ENV = "TESTRAIL_TESTS"
 
 
 @dataclass(frozen=True)
@@ -187,16 +229,19 @@ def main() -> int:
 
     load_dotenv(PROJECT_ROOT / ".env")
 
-    mode = get_env_int("TESTRAIL_RUN_MODE", required=True)
-    if mode == RUN_MODE_MULTI:
-        return run_multi_tests(args.dry_run)
-    if mode == RUN_MODE_DAILY:
-        return run_daily_tests(args)
-    raise RuntimeError("TESTRAIL_RUN_MODE must be 2 or 3")
+    return run_tests(resolve_run_mode(), args)
 
 
-def resolve_run_strategy(mode: int) -> str:
-    return DEFAULT_DAILY_RUN_STRATEGY if mode == RUN_MODE_DAILY else DEFAULT_MULTI_RUN_STRATEGY
+def resolve_run_mode() -> RunMode:
+    """解析 TESTRAIL_RUN_MODE，同時接受語意值與舊版數字寫法。"""
+
+    raw = get_env_str("TESTRAIL_RUN_MODE", required=True).strip().lower()
+    key = LEGACY_RUN_MODES.get(raw, raw)
+    mode = RUN_MODES.get(key)
+    if mode is None:
+        valid = " / ".join(sorted(RUN_MODES))
+        raise RuntimeError(f"TESTRAIL_RUN_MODE must be one of: {valid} (got {raw!r})")
+    return mode
 
 
 def is_testrail_reporting_enabled(dry_run: bool = False) -> bool:
@@ -207,18 +252,23 @@ def should_use_slack_progress_updates() -> bool:
     return get_env_bool("SLACK_NOTIFY_ENABLED", default=False)
 
 
-def build_local_run_name(mode: int, args: argparse.Namespace | None = None) -> str:
+def build_local_run_name(mode: RunMode, args: argparse.Namespace | None = None) -> str:
+    """組出 run 名稱；--name 優先，否則用「模式前綴 + 時間戳」。"""
+
     name_override = args.name if args is not None else None
-    default_prefix = DEFAULT_DAILY_RUN_NAME_PREFIX if mode == RUN_MODE_DAILY else DEFAULT_MULTI_RUN_NAME_PREFIX
     timestamp = datetime.now(resolve_timezone()).strftime("%Y-%m-%d %H:%M")
-    return name_override or f"{default_prefix} - {timestamp}"
+    return name_override or f"{mode.run_name_prefix} - {timestamp}"
 
 
 def resolve_timezone() -> ZoneInfo | timezone:
+    """讀取 RUN_TIMEZONE；系統缺少時區資料庫時退回 UTC，不讓執行中斷。"""
+
+    name = get_env_str("RUN_TIMEZONE", required=False).strip() or DEFAULT_TIMEZONE
     try:
-        return ZoneInfo(DEFAULT_TIMEZONE)
-    except ZoneInfoNotFoundError:
-        return timezone(timedelta(hours=8), name=DEFAULT_TIMEZONE)
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        print(f"時區 {name!r} 無法解析，改用 UTC。")
+        return timezone(timedelta(0), name="UTC")
 
 
 def parse_env_file_list(env_name: str) -> list[str | int]:
@@ -445,99 +495,58 @@ def extract_case_id_from_text(value: object) -> int | None:
 
 
 
-def run_multi_tests(dry_run: bool) -> int:
-    test_cases = load_test_cases_from_env("TESTRAIL_MULTI_TESTS")
+def load_test_cases_for_mode(mode: RunMode) -> list[TestCaseModule]:
+    """載入指定模式要執行的案例。
+
+    優先讀模式專用的清單變數；沒設定時退回共用的 TESTRAIL_TESTS，
+    讓只有一組案例清單的專案不必為了模式而重複設定。
+    """
+
+    for env_name in (mode.cases_env, SHARED_CASES_ENV):
+        test_cases = load_test_cases_from_env(env_name)
+        if test_cases:
+            return test_cases
+    return []
+
+
+def run_tests(mode: RunMode, args: argparse.Namespace) -> int:
+    """批次執行案例的主流程。
+
+    兩種模式共用這一條流程，差異只由 RunMode 帶入：
+
+        1. 依模式載入案例清單
+        2. 決定結果要回報到哪個 TestRail run（沿用既有 / 建立新的）
+        3. 逐支執行，過程中持續更新 Slack 進度訊息
+        4. 收尾：解析 run 連結、送出彙總通知
+
+    執行期間把 SLACK_NOTIFY_DEFERRED 設為 1，讓個別案例不要各自發通知，
+    改由這裡統一在最後彙總送出；無論成功或中斷都會在 finally 還原。
+    """
+
+    test_cases = load_test_cases_for_mode(mode)
     if not test_cases:
-        print("TESTRAIL_MULTI_TESTS has no executable test cases.")
+        print(
+            f"No executable test cases for run mode '{mode.key}'. "
+            f"Set {mode.cases_env} or {SHARED_CASES_ENV}."
+        )
         return 1
 
-    reporting_enabled = is_testrail_reporting_enabled(dry_run)
-    client = TestRailClient.from_env(PROJECT_ROOT / ".env") if reporting_enabled else None
-    if client is not None:
-        run_info = prepare_run_info(
-            client=client,
-            test_cases=test_cases,
-            dry_run=dry_run,
-            mode=RUN_MODE_MULTI,
-        )
-    else:
-        run_info = RunInfo(run_id=0, run_name=build_local_run_name(RUN_MODE_MULTI), run_url="")
-
-    progress_notifier = None
-    if should_use_slack_progress_updates():
-        progress_notifier = SlackProgressNotifier(
-            run_name=run_info.run_name,
-            run_url=run_info.run_url,
-            total=len(test_cases),
-            interval_seconds=get_slack_progress_interval_seconds(),
-        )
-
-    case_summaries: list[CaseExecutionSummary] = []
-    previous_deferred = os.environ.get("SLACK_NOTIFY_DEFERRED")
-    os.environ["SLACK_NOTIFY_DEFERRED"] = "1"
-    run_error: BaseException | None = None
-    try:
-        if progress_notifier is not None:
-            progress_notifier.start()
-        for test_case in test_cases:
-            if progress_notifier is not None:
-                progress_notifier.set_current_case(test_case.file_path.name)
-            print(f"Running multi test case: {test_case.file_path.name} (C{test_case.case_id})")
-            summary = run_case_main(
-                test_case,
-                dry_run=dry_run,
-                run_id=run_info.run_id if run_info.run_id else None,
-            )
-            case_summaries.append(summary)
-            if progress_notifier is not None:
-                progress_notifier.record_case_summary(summary)
-    except BaseException as exc:
-        # 記錄中斷原因後照常往上拋，讓 job 仍以非零 exit code 結束。
-        run_error = exc
-        raise
-    finally:
-        restore_env_var("SLACK_NOTIFY_DEFERRED", previous_deferred)
-        if progress_notifier is not None:
-            if client is not None:
-                # 中斷時 TestRail 很可能正是出問題的一方，查 run link 失敗
-                # 不該連帶讓通知送不出去。
-                try:
-                    run_links = resolve_run_links(client, case_summaries, preferred_run=run_info)
-                    if len(run_links) == 1 and run_info.run_id:
-                        progress_notifier.set_run_display(run_info.run_name, run_info.run_url)
-                    else:
-                        progress_notifier.set_run_display(render_run_links_for_progress(run_links, run_info))
-                except Exception as exc:
-                    print(f"解析 TestRail run link 失敗，改用預設名稱：{exc}")
-            progress_notifier.finish(
-                aborted=run_error is not None,
-                abort_reason=format_abort_reason(run_error) if run_error is not None else "",
-            )
-
-    print(f"Multi test run completed: {len(test_cases)} case(s)")
-    if client is not None and not should_use_slack_progress_updates():
-        send_slack_summary_if_needed(client, case_summaries, preferred_run=run_info)
-    return 0
-
-
-def run_daily_tests(args: argparse.Namespace) -> int:
-    test_cases = load_test_cases_from_env("TESTRAIL_DAILY_TESTS")
-    if not test_cases:
-        print("TESTRAIL_DAILY_TESTS has no executable test cases.")
-        return 1
-
-    reporting_enabled = is_testrail_reporting_enabled(args.dry_run)
-    client = TestRailClient.from_env(PROJECT_ROOT / ".env") if reporting_enabled else None
+    client = (
+        TestRailClient.from_env(PROJECT_ROOT / ".env")
+        if is_testrail_reporting_enabled(args.dry_run)
+        else None
+    )
     if client is not None:
         run_info = prepare_run_info(
             client=client,
             test_cases=test_cases,
             dry_run=args.dry_run,
-            mode=RUN_MODE_DAILY,
+            mode=mode,
             args=args,
         )
     else:
-        run_info = RunInfo(run_id=0, run_name=build_local_run_name(RUN_MODE_DAILY, args=args), run_url="")
+        # 不回報 TestRail 時仍需要一個 run 名稱，供 console 與 Slack 顯示。
+        run_info = RunInfo(run_id=0, run_name=build_local_run_name(mode, args=args), run_url="")
 
     progress_notifier = None
     if should_use_slack_progress_updates():
@@ -558,7 +567,8 @@ def run_daily_tests(args: argparse.Namespace) -> int:
         for test_case in test_cases:
             if progress_notifier is not None:
                 progress_notifier.set_current_case(test_case.file_path.name)
-            print(f"Running daily test case: {test_case.file_path.name} (C{test_case.case_id})")
+            print(f"Running {mode.label} case: {test_case.file_path.name} (C{test_case.case_id})")
+            # run_id 為 0 時 run_case_main 會退回案例自己的 TEST_RUN_ID。
             summary = run_case_main(test_case, dry_run=args.dry_run, run_id=run_info.run_id)
             case_summaries.append(summary)
             if progress_notifier is not None:
@@ -586,10 +596,32 @@ def run_daily_tests(args: argparse.Namespace) -> int:
                 abort_reason=format_abort_reason(run_error) if run_error is not None else "",
             )
 
-    print(f"Daily test run completed: {len(test_cases)} case(s)")
+    # 有進度通知時最後一則已含完整結果，不必再送一次彙總。
     if client is not None and not should_use_slack_progress_updates():
         send_slack_summary_if_needed(client, case_summaries, preferred_run=run_info)
-    return 0
+
+    return report_exit_code(mode, case_summaries)
+
+
+def report_exit_code(mode: RunMode, case_summaries: list[CaseExecutionSummary]) -> int:
+    """印出彙總並決定行程的 exit code。
+
+    案例內的例外由 case_runner 攔下並轉成 FAILED 結果，因此執行本身不會拋出。
+    若這裡固定回傳 0，CI 會在測試全數失敗時仍判定成功——所以只要有任何一支
+    案例不是 PASSED，就以非零結束，讓 pipeline 正確亮紅燈。
+    """
+
+    passed = sum(1 for summary in case_summaries if summary.status_id == PASSED)
+    failed = sum(1 for summary in case_summaries if summary.status_id == FAILED)
+    blocked = sum(1 for summary in case_summaries if summary.status_id == BLOCKED)
+    other = len(case_summaries) - passed - failed - blocked
+
+    print(
+        f"Test run completed ({mode.key}): {len(case_summaries)} case(s) — "
+        f"passed={passed} failed={failed} blocked={blocked}"
+        + (f" other={other}" if other else "")
+    )
+    return 0 if passed == len(case_summaries) else 1
 
 
 def format_abort_reason(exc: BaseException, max_length: int = 300) -> str:
@@ -606,12 +638,17 @@ def prepare_run_info(
     client: TestRailClient,
     test_cases: list[TestCaseModule],
     dry_run: bool,
-    mode: int,
+    mode: RunMode,
     args: argparse.Namespace | None = None,
 ) -> RunInfo:
-    """內部輔助函式。"""
+    """決定這次執行的結果要寫進哪個 TestRail run。
 
-    strategy = resolve_run_strategy(mode)
+    existing：不建立 run，沿用每支案例自己的 TEST_RUN_ID
+              （或 DEFAULT_EXISTING_RUN_ID 指定的固定 run）。
+    new     ：呼叫 TestRail API 建立一個新 run，涵蓋本次所有案例。
+    """
+
+    strategy = mode.strategy
     if strategy == "existing":
         existing_run_id = DEFAULT_EXISTING_RUN_ID
         run_name = (

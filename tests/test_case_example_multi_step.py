@@ -17,9 +17,9 @@ if str(PROJECT_ROOT) not in sys.path:
 from playwright.sync_api import expect
 
 from support.case_runner import run_case
-from support.login import login_backoffice
+from support.login import login
 from support.screenshots import save_step_screenshot
-from support.test_env import get_merchant_credentials, resolve_env_mode
+from support.test_env import get_credentials, resolve_env
 from testrail_client import FAILED, PASSED, StepReport, abort_remaining_steps
 
 # TestRail 上的 case id 與預設回報的 run id。
@@ -38,24 +38,24 @@ def steps(page, screenshot_dir, step_reports):
     step_reports 的第 N 筆會對應到 TestRail case 的第 N 個步驟，順序要一致。
     """
 
-    # 目前執行環境（QA / STAGE）與該環境的商戶資料，都由 .env 的 ADMIN_ENV_MODE 決定。
-    env_mode = resolve_env_mode("ADMIN_ENV_MODE")
-    merchant = get_merchant_credentials()
-    print(f"[前置] 執行環境={env_mode}，商戶={merchant.name}")
+    # 目前環境與該環境的帳密都由 .env 的 TEST_ENV 決定，程式碼不需要知道是哪一套。
+    env = resolve_env()
+    admin = get_credentials("admin")
+    print(f"[前置] 執行環境={env}，帳號={admin.username}")
 
     # ------------------------------------------------------------------
-    # 步驟 1：登入商戶後台
+    # 步驟 1：登入
     # ------------------------------------------------------------------
-    print("[1] 登入商戶後台")
-    login_backoffice(page, "merchant")
+    print("[1] 登入")
+    login(page, "admin")
 
-    # 截圖存成 IMG/C{CASE_ID}_{時間戳}/step_01_merchant_login.png，
+    # 截圖存成 IMG/C{CASE_ID}_{時間戳}/step_01_login.png，
     # 回報時會自動上傳並內嵌到 TestRail 的該步驟結果裡。
-    screenshot = save_step_screenshot(page, screenshot_dir, 1, "merchant_login")
+    screenshot = save_step_screenshot(page, screenshot_dir, 1, "login")
     step_reports.append(
         StepReport(
             PASSED,
-            f"AUTOTEST: passed - Step 1: 以 {merchant.account} 登入商戶後台（{env_mode}）",
+            f"AUTOTEST: passed - Step 1: 以 {admin.username} 登入（{env}）",
             [screenshot],
         )
     )
@@ -64,7 +64,7 @@ def steps(page, screenshot_dir, step_reports):
     # 步驟 2：進入功能頁並驗證畫面
     # ------------------------------------------------------------------
     print("[2] 進入側邊欄第一個功能頁")
-    page.locator(".sidebar__item-label").first.click()  # TODO: 換成實際的選單 selector
+    page.locator("nav a").first.click()  # TODO: 換成受測站台實際的選單 selector
 
     # expect() 會自動等待，比 sleep 穩定；逾時會拋例外，
     # 由 case_runner 統一截圖並補上 FAILED，不需要自己 try/except。

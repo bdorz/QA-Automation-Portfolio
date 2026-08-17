@@ -37,7 +37,8 @@ variables:
   # 執行設定：可以直接寫在這裡，不含機敏資料。
   # ---------------------------------------------------------------------
   TESTRAIL_PROJECT_ID: "1"
-  TESTRAIL_RUN_MODE: "3"
+  TESTRAIL_RUN_MODE: "new"
+  RUN_TIMEZONE: "Asia/Taipei"
   TESTRAIL_VERBOSE: "true"
   TESTRAIL_REPORT_ENABLED: "true"
   SLACK_NOTIFY_ENABLED: "true"
@@ -54,29 +55,19 @@ variables:
   #   SLACK_BOT_TOKEN           Slack Bot Token（xoxb-...）
   #   SLACK_CHANNEL_ID          Slack 頻道 ID
   #
-  #   platform_QA_LOGIN_URL     以下為受測站台登入資料，QA / STAGE 各一組
-  #   platform_QA_ACCOUNT
-  #   platform_QA_PASSWORD
-  #   merchant_QA_LOGIN_URL
-  #   merchant_QA_NAME
-  #   merchant_QA_ACCOUNT
-  #   merchant_QA_PASSWORD
-  #   platform_STAGE_LOGIN_URL
-  #   platform_STAGE_ACCOUNT
-  #   platform_STAGE_PASSWORD
-  #   merchant_STAGE_LOGIN_URL
-  #   merchant_STAGE_NAME
-  #   merchant_STAGE_ACCOUNT
-  #   merchant_STAGE_PASSWORD
+  #   受測站台登入資料，命名為 {角色}_{環境}_{欄位}：
+  #   ADMIN_QA_LOGIN_URL        ADMIN_STAGE_LOGIN_URL
+  #   ADMIN_QA_USERNAME         ADMIN_STAGE_USERNAME
+  #   ADMIN_QA_PASSWORD         ADMIN_STAGE_PASSWORD
   # ---------------------------------------------------------------------
 
 run-automation:
   stage: test
   variables:
-    # 0/QA 或 1/STAGE，決定使用哪一組登入資料
-    ADMIN_ENV_MODE: "1"
+    # 決定使用哪一組登入資料，對應 CI Variables 的 {角色}_{環境}_* 前綴
+    TEST_ENV: "STAGE"
     # 要執行的 testcase，可填 CASE_ID、TEST_RUN_ID 或檔名
-    TESTRAIL_DAILY_TESTS: '["test_case_sample"]'
+    TESTRAIL_TESTS: '["test_case_sample"]'
   script:
     # xvfb-run 讓 headed 模式可以在無桌面的 CI runner 上執行
     - xvfb-run -a python run_qa_tests.py --name "Daily Auto Check - $(date '+%Y-%m-%d %H:%M')"

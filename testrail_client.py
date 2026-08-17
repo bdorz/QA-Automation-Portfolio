@@ -792,14 +792,13 @@ def build_testrail_file_link_html(attachment_url: str, attachment_name: str) -> 
 
 
 def build_execution_environment_comment(case_id: int) -> str:
-    mode = resolve_runtime_env_mode()
-    platform_prefix = build_runtime_env_prefix("platform", mode)
-    merchant_prefix = build_runtime_env_prefix("merchant", mode)
+    """產生附在 TestRail 結果最前面的執行環境資訊區塊。
+
+    需要顯示更多欄位（例如受測角色帳號、版本號）時，往 rows 加即可。
+    """
+
     rows = [
-        ("環境", mode),
-        ("平台帳號", get_env_str(f"{platform_prefix}_ACCOUNT")),
-        ("商戶", get_env_str(f"{merchant_prefix}_NAME")),
-        ("商戶帳號", get_env_str(f"{merchant_prefix}_ACCOUNT")),
+        ("環境", resolve_runtime_env()),
         ("測試案例", f"C{case_id}"),
     ]
     items = "".join(
@@ -819,20 +818,14 @@ def build_execution_environment_comment(case_id: int) -> str:
     )
 
 
-def resolve_runtime_env_mode() -> str:
-    value = get_env_str("ADMIN_ENV_MODE", required=False).strip()
-    normalized = value.upper()
-    if normalized in {"", "0", "QA"}:
-        return "QA"
-    if normalized in {"1", "STAGE"}:
-        return "STAGE"
-    return normalized
+def resolve_runtime_env() -> str:
+    """讀取目前測試環境名稱，供結果註解顯示。
 
+    與 support.test_env.resolve_env() 同一個變數；這裡另外實作一份，
+    是為了讓 testrail_client 不反向相依 support 套件。
+    """
 
-def build_runtime_env_prefix(base: str, mode: str) -> str:
-    if mode == "STAGE":
-        return f"{base}_STAGE"
-    return f"{base}_QA"
+    return (get_env_str("TEST_ENV", required=False).strip() or "QA").upper()
 
 
 def build_testrail_result(

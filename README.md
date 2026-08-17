@@ -2,34 +2,151 @@
 
 Python + Playwright 的 E2E 測試範本，整合 TestRail 結果回報、截圖／錄影附件與 Slack 通知。
 
-測試案例只需要寫「測試步驟」本身，開瀏覽器、建立截圖目錄、錄影、統一錯誤處理、
+測試案例只需要寫「測試步驟」本身 —— 開瀏覽器、建立截圖目錄、錄影、統一錯誤處理、
 把結果連同截圖寫回 TestRail、以及執行進度通知，全部由框架處理。
 
-## 特色
+```python
+def steps(page, screenshot_dir, step_reports):
+    login(page, "admin")
+    screenshot = save_step_screenshot(page, screenshot_dir, 1, "login")
+    step_reports.append(StepReport(PASSED, "AUTOTEST: passed - 登入成功", [screenshot]))
+```
 
-- **案例只寫 `steps()`** — 開瀏覽器／截圖／錄影／try-except／TestRail 回報都由 `run_case()` 承擔
-- **截圖直接內嵌 TestRail** — 圖片上傳後以 `<img>` 嵌進對應步驟的實際結果欄位
-- **未執行步驟自動補 BLOCKED** — 中途失敗時剩餘步驟不會留白
-- **單一變數切換環境** — `ADMIN_ENV_MODE` 一改，整組 QA / STAGE 登入資料跟著換
-- **Slack 進度就地更新** — 執行期間持續更新同一則訊息，中斷時明確標示未執行數量
-- **零機敏資料進版控** — 所有憑證由環境變數提供，程式碼內沒有任何預設值
+上面這幾行跑完，TestRail 上對應的 case 會出現一筆結果，步驟一的「實際結果」欄位裡
+直接內嵌著那張截圖。
+
+---
+
+## 目錄
+
+- [架構](#架構)
+- [專案結構](#專案結構)
+- [安裝](#安裝)
+- [設定](#設定)
+- [執行](#執行)
+- [新增測試案例](#新增測試案例)
+- [CI](#ci)
+- [常見問題](#常見問題)
+
+---
+
+## 架構
+
+### 設計目標
+
+E2E 測試最容易腐化的地方，是**每支案例各自處理瀏覽器生命週期、截圖、例外和回報**。
+案例一多，同樣的 try-except 和 screenshot 樣板會被複製十幾份，改一個行為要改十幾個檔案。
+
+這套範本把那些重複收斂到一層共用骨架，讓案例檔案裡**只剩下業務步驟**。
+
+### 執行流程
+
+```mermaid
+flowchart TB
+    ENV[".env / CI Variables"] -.-> RUNNER
+
+    RUNNER["run_qa_tests.py<br/>批次執行器"]
+    RUNNER --> MODE{"TESTRAIL_RUN_MODE"}
+    MODE -->|new| NEWRUN["建立新的 TestRail run"]
+    MODE -->|existing| OLDRUN["沿用案例的 TEST_RUN_ID"]
+    NEWRUN --> LOOP
+    OLDRUN --> LOOP
+
+    LOOP["逐支執行案例"]
+    LOOP --> CR
+
+    subgraph SKELETON ["support/case_runner.py — 共用骨架"]
+        direction TB
+        CR["run_case()"]
+        CR --> BROWSER["browser.py<br/>開 Chromium、啟動錄影"]
+        BROWSER --> STEPS["呼叫案例的 steps()"]
+        STEPS --> COLLECT["收集 step_reports"]
+        COLLECT --> CLEANUP["關閉瀏覽器、保存影片"]
+    end
+
+    STEPS -.->|案例可用| HELPERS["login.py<br/>screenshots.py"]
+
+    CLEANUP --> TR["testrail_client.py"]
+    TR --> UPLOAD["上傳截圖／影片"]
+    UPLOAD --> RESULT["組裝 step results<br/>內嵌圖片 HTML"]
+    RESULT --> POST["寫回 TestRail"]
+
+    LOOP -.->|每支完成即更新| SLACK["slack.py<br/>就地更新同一則進度訊息"]
+    POST --> SUMMARY["彙總通知"]
+    SLACK --> SUMMARY
+```
+
+### 分層職責
+
+| 層 | 檔案 | 負責 | 不負責 |
+| --- | --- | --- | --- |
+| 批次執行 | `run_qa_tests.py` | 解析設定、挑選案例、管理 TestRail run、Slack 進度 | 不碰瀏覽器 |
+| 共用骨架 | `support/case_runner.py` | 瀏覽器生命週期、截圖目錄、例外攔截、結果回報 | 不知道任何業務步驟 |
+| 測試案例 | `tests/test_case_*.py` | 只寫業務步驟與斷言 | 不開瀏覽器、不處理例外、不呼叫 TestRail |
+| 站台適配 | `support/login.py`、`test_env.py` | 登入流程、環境與帳密解析 | 不知道測哪些功能 |
+| 外部整合 | `testrail_client.py`、`slack.py` | API 呼叫、重試、附件上傳、訊息組裝 | 不知道測試怎麼跑 |
+
+### 關鍵設計決策
+
+**1. `step_reports` 用 append 而非 return**
+
+```python
+def steps(page, screenshot_dir, step_reports):
+    step_reports.append(StepReport(PASSED, "...", [screenshot]))   # 不是 return
+```
+
+案例在第 3 步爆掉時，若採 `return`，前 2 步的結果會跟著例外一起消失，TestRail 上
+只會看到「整個 case 失敗」而不知道走到哪裡。改成往呼叫端傳入的 list append，
+骨架在 `except` 區塊裡仍握有已完成的結果，能精確回報「1、2 通過，3 失敗」。
+
+**2. 未執行的步驟自動補 BLOCKED**
+
+第 3 步失敗後，第 4、5 步根本沒跑。留白會讓人以為漏測，標成 FAILED 又是謊報。
+`run_case()` 會把它們補成 BLOCKED 並註明「因前一步失敗而未執行」，
+讓 TestRail 上的狀態與實際情況一致。
+
+**3. 截圖內嵌到步驟，而非掛在整筆結果下**
+
+`StepReport.attachments` 裡的圖片會先上傳取得 attachment id，再組成 `<img>` 標籤
+寫進**該步驟**的實際結果欄位。看報告的人不必在一堆附件裡猜哪張對應哪一步。
+
+**4. 憑證只從環境變數讀，程式碼內沒有預設值**
+
+`load_config_from_env()` 三個欄位都是 `required=True`，缺少時直接報出變數名稱。
+沒有「預設值」可以退回，也就沒有把憑證寫死進版控的機會。
+
+**5. `.env` 不覆蓋既有環境變數**
+
+`load_dotenv()` 只在該 key 尚未存在時才寫入。本機讀 `.env`，CI 讀 CI Variables，
+同一份程式碼不需要分支判斷自己跑在哪裡。
+
+**6. 角色與環境都不寫死**
+
+登入變數採 `{角色}_{環境}_{欄位}` 命名。切換環境只改 `TEST_ENV`；
+新增角色只要在 `.env` 補一組同前綴的變數，共用模組一行都不用改。
+
+---
 
 ## 專案結構
 
 | 路徑 | 說明 |
 | --- | --- |
-| `run_qa_tests.py` | 批次執行器：依 `.env` 挑選 testcase、建立 TestRail run、推送 Slack 進度。 |
-| `testrail_client.py` | TestRail API client、step result 組裝、附件上傳與單支 testcase 回報。 |
-| `slack.py` | Slack 進度與結果通知（Webhook + Bot Token 兩種發送方式）。 |
-| `TEST/` | 測試案例。每支提供 `CASE_ID`、`TEST_RUN_ID` 與 `steps()`，並以 `run_case()` 執行。 |
-| `TEST/test_case_sample.py` | 最小範例：登入後回報一個步驟。 |
-| `TEST/test_case_example_multi_step.py` | 完整範例：多步驟、逐步截圖、FAILED 與中止後續步驟。 |
-| `support/case_runner.py` | 案例共用執行骨架 `run_case()`。 |
+| `run_qa_tests.py` | 批次執行器：挑選案例、建立 TestRail run、推送 Slack 進度。 |
+| `testrail_client.py` | TestRail API client、重試、附件上傳、step result 組裝。 |
+| `slack.py` | Slack 進度與結果通知（Webhook 與 Bot Token 兩種發送方式）。 |
+| `tests/` | 測試案例。每支提供 `CASE_ID`、`TEST_RUN_ID` 與 `steps()`。 |
+| `tests/test_case_sample.py` | 最小範例：登入後回報一個步驟。 |
+| `tests/test_case_example_multi_step.py` | 完整範例：多步驟、逐步截圖、FAILED 與中止後續步驟。 |
+| `support/case_runner.py` | 共用執行骨架 `run_case()`。 |
 | `support/browser.py` | 建立 Chromium page、錄影與影片保存。 |
-| `support/login.py` | 後台登入 helper，支援 `platform` / `merchant`。 |
-| `support/test_env.py` | 依 `ADMIN_ENV_MODE` 從 `.env` 解析登入設定。 |
-| `support/screenshots.py` | 截圖路徑建立與截圖保存。 |
-| `IMG/` | 截圖輸出目錄（執行時自動產生，已 gitignore）。 |
+| `support/login.py` | 登入流程；需依站台調整的 selector 集中在檔案開頭。 |
+| `support/test_env.py` | 依 `TEST_ENV` 解析各角色的登入資料。 |
+| `support/screenshots.py` | 截圖路徑建立與保存。 |
+| `.github/workflows/e2e.yml` | GitHub Actions：排程與手動觸發。 |
+| `.gitlab-ci.yml` | GitLab CI 參考範例（本專案託管於 GitHub，此檔不會被執行）。 |
+| `IMG/` | 截圖與錄影輸出（執行時自動產生，已 gitignore）。 |
+
+---
 
 ## 安裝
 
@@ -45,11 +162,13 @@ python -m venv .venv
 Copy-Item .env.example .env
 ```
 
-## `.env` 設定
+---
+
+## 設定
+
+所有設定都在 `.env`（本機）或 CI Variables（CI）。`.env` 已被 gitignore。
 
 ### TestRail 連線（必填）
-
-程式碼內沒有任何預設值，缺少時會直接報錯：
 
 ```env
 TESTRAIL_URL=https://your-org.testrail.io/
@@ -58,67 +177,91 @@ TESTRAIL_API_KEY=your-testrail-api-key
 TESTRAIL_PROJECT_ID=1
 ```
 
-### Slack 通知（`SLACK_NOTIFY_ENABLED=true` 時才需要）
+程式碼內沒有任何預設值，缺少時直接報 `Missing environment variable: TESTRAIL_URL`。
+
+### 執行模式
 
 ```env
+TESTRAIL_RUN_MODE=new
+TESTRAIL_TESTS=["test_case_sample"]
+RUN_TIMEZONE=Asia/Taipei
+```
+
+| 值 | 行為 | 適用 |
+| --- | --- | --- |
+| `new` | 每次執行建立一個新的 TestRail run | 排程的每日巡檢 |
+| `existing` | 不建立 run，沿用每支案例自己的 `TEST_RUN_ID` | 針對特定 run 補跑 |
+
+舊版的數字寫法（`2` = existing、`3` = new）仍可使用。
+
+`TESTRAIL_TESTS` 是 JSON 陣列，三種寫法都接受：
+
+- `CASE_ID`，例如 `6540`
+- `TEST_RUN_ID`
+- 檔名，例如 `"test_case_sample"` 或 `"test_case_sample.py"`
+
+需要讓兩種模式各跑不同案例時，可另外指定 `TESTRAIL_TESTS_NEW` /
+`TESTRAIL_TESTS_EXISTING`；未設定則沿用 `TESTRAIL_TESTS`。
+
+### 受測站台登入資料
+
+變數採 `{角色}_{環境}_{欄位}` 命名：
+
+```env
+TEST_ENV=QA
+
+ADMIN_QA_LOGIN_URL=https://qa.example.com/login
+ADMIN_QA_USERNAME=your-qa-username
+ADMIN_QA_PASSWORD=your-qa-password
+
+ADMIN_STAGE_LOGIN_URL=https://stage.example.com/login
+ADMIN_STAGE_USERNAME=your-stage-username
+ADMIN_STAGE_PASSWORD=your-stage-password
+```
+
+**切換環境** —— 只改一個變數，整組帳密跟著換：
+
+```env
+TEST_ENV=STAGE
+```
+
+**新增角色** —— 在 `.env` 補一組同格式的變數，共用模組不用改：
+
+```env
+USER_QA_LOGIN_URL=https://qa.example.com/login
+USER_QA_USERNAME=...
+USER_QA_PASSWORD=...
+```
+
+```python
+login(page, "user")     # 對應 USER_{TEST_ENV}_*
+```
+
+環境名稱不限於 `QA` / `STAGE`；設 `TEST_ENV=PROD` 就會去找 `ADMIN_PROD_*`。
+
+### Slack 通知（選用）
+
+```env
+SLACK_NOTIFY_ENABLED=true
 SLACK_WEBHOOK_URL=          # 最終結果通知
 SLACK_BOT_TOKEN=            # 進度訊息就地更新用（xoxb-...）
 SLACK_CHANNEL_ID=           # 進度訊息發送的頻道
 SLACK_PROGRESS_INTERVAL_SECONDS=10
 ```
 
-只填 `SLACK_WEBHOOK_URL` 也能運作，差別在於每次更新會是一則新訊息；
+只填 `SLACK_WEBHOOK_URL` 也能運作，差別在於每次更新是一則新訊息；
 補上 `SLACK_BOT_TOKEN` + `SLACK_CHANNEL_ID` 才會就地更新同一則。
 
-### 執行設定
+### 其他
 
-```env
-TESTRAIL_RUN_MODE=3
-TESTRAIL_MULTI_TESTS=["test_case_sample"]
-TESTRAIL_DAILY_TESTS=["test_case_sample"]
-TESTRAIL_VERBOSE=false
-TESTRAIL_REPORT_ENABLED=true
-SLACK_NOTIFY_ENABLED=false
-TESTRAIL_RECORD_VIDEO=false
-```
+| 變數 | 預設 | 說明 |
+| --- | --- | --- |
+| `TESTRAIL_REPORT_ENABLED` | `true` | 設 `false` 只跑流程不回報，本機驗證用 |
+| `TESTRAIL_RECORD_VIDEO` | `false` | 錄影，失敗時附到結果 |
+| `TESTRAIL_VERBOSE` | `false` | 較詳細的 console log |
+| `RUN_TIMEZONE` | `UTC` | run 名稱時間戳的時區 |
 
-| 變數 | 說明 |
-| --- | --- |
-| `TESTRAIL_RUN_MODE` | `2` 使用 `TESTRAIL_MULTI_TESTS`（沿用案例自己的 run），`3` 使用 `TESTRAIL_DAILY_TESTS`（每次建立新 run）。 |
-| `TESTRAIL_MULTI_TESTS` / `TESTRAIL_DAILY_TESTS` | 要執行的 testcase，JSON array。 |
-| `TESTRAIL_REPORT_ENABLED` | `true` 會回報 TestRail；本機驗證流程可設 `false`。 |
-| `TESTRAIL_RECORD_VIDEO` | `true` 時 Playwright 會錄影，失敗時附到結果。 |
-| `SLACK_NOTIFY_ENABLED` | `true` 時會送 Slack 通知。 |
-
-`TESTRAIL_MULTI_TESTS` / `TESTRAIL_DAILY_TESTS` 三種寫法都可以：
-
-- `CASE_ID`，例如 `6540`
-- `TEST_RUN_ID`
-- 測試檔名，例如 `"test_case_sample"` 或 `"test_case_sample.py"`
-
-### 受測站台 QA / STAGE 切換
-
-`ADMIN_ENV_MODE` 控制登入資料來源：
-
-| 值 | 使用設定 |
-| --- | --- |
-| `0` 或 `QA` | `platform_QA_*`、`merchant_QA_*` |
-| `1` 或 `STAGE` | `platform_STAGE_*`、`merchant_STAGE_*` |
-
-```env
-ADMIN_ENV_MODE=0
-
-platform_QA_LOGIN_URL=https://qa.example.com/platform/login
-platform_QA_ACCOUNT=your-qa-platform-account
-platform_QA_PASSWORD=your-qa-platform-password
-merchant_QA_LOGIN_URL=https://qa.example.com/merchant/<merchant-id>/login
-merchant_QA_NAME=your-qa-merchant-name
-merchant_QA_ACCOUNT=your-qa-merchant-account
-merchant_QA_PASSWORD=your-qa-merchant-password
-```
-
-`STAGE` 同樣有一組 `platform_STAGE_*` / `merchant_STAGE_*`。把 `ADMIN_ENV_MODE`
-從 `0` 改成 `1` 重新執行，就會整組切到 STAGE。
+---
 
 ## 執行
 
@@ -129,21 +272,23 @@ merchant_QA_PASSWORD=your-qa-merchant-password
 # 只跑流程不回報 TestRail
 .\.venv\Scripts\python.exe run_qa_tests.py --dry-run
 
-# 指定建立的 run 名稱
+# 指定 run 名稱
 .\.venv\Scripts\python.exe run_qa_tests.py --name "Daily Auto Check - 2026-01-01"
 
 # 單獨執行某一支案例
-.\.venv\Scripts\python.exe TEST\test_case_sample.py --dry-run
+.\.venv\Scripts\python.exe tests\test_case_sample.py --dry-run
 ```
+
+---
 
 ## 新增測試案例
 
-複製 `TEST/test_case_sample.py`，改成自己的 `CASE_ID` / `TEST_RUN_ID`，
+複製 `tests/test_case_sample.py`，改成自己的 `CASE_ID` / `TEST_RUN_ID`，
 在 `steps()` 裡寫測試流程：
 
 ```python
 from support.case_runner import run_case
-from support.login import login_backoffice
+from support.login import login
 from support.screenshots import save_step_screenshot
 from testrail_client import PASSED, StepReport
 
@@ -152,7 +297,7 @@ TEST_RUN_ID = 0
 
 
 def steps(page, screenshot_dir, step_reports):
-    login_backoffice(page, "merchant")
+    login(page, "admin")
     screenshot = save_step_screenshot(page, screenshot_dir, 1, "login")
     step_reports.append(
         StepReport(PASSED, "AUTOTEST: passed - 登入成功", [screenshot])
@@ -165,45 +310,49 @@ if __name__ == "__main__":
 
 重點：
 
-- `steps()` 收到 `(page, screenshot_dir, step_reports)`，直接往 `step_reports` **append** 而非
-  `return` —— 這樣即使中途丟出例外，runner 仍保有已完成的 `StepReport` 可回報。
+- `steps()` 收到 `(page, screenshot_dir, step_reports)`，往 `step_reports` **append**
+  而非 `return`（理由見[關鍵設計決策](#關鍵設計決策)）。
 - `step_reports` 的第 N 筆對應 TestRail case 的第 N 個步驟，順序要一致。
-- 例外處理不用自己寫，`run_case()` 會統一截圖、（開啟時）錄影並補上 `FAILED` 結果。
-- 需要提前中止時呼叫 `abort_remaining_steps(step_reports)`，未執行步驟會自動補 `BLOCKED`。
-- `TEST_RUN_ID <= 0` 預設視為 dry run。
+- 例外處理不用自己寫，`run_case()` 會統一截圖、錄影並補上 `FAILED`。
+- 需要提前中止時呼叫 `abort_remaining_steps(step_reports)`，未執行步驟自動補 `BLOCKED`。
+- `TEST_RUN_ID <= 0` 視為 dry run。
 
 `StepReport` 欄位：
 
 | 欄位 | 說明 |
 | --- | --- |
-| `status_id` | TestRail status id：`PASSED`、`FAILED`、`BLOCKED`。 |
-| `actual` | 寫入 TestRail 的執行結果文字。 |
-| `attachments` | 要上傳的截圖或影片路徑 list，不附檔就傳 `[]`。圖片會內嵌到步驟結果，其他檔案掛在整筆 result。 |
+| `status_id` | `PASSED`、`FAILED`、`BLOCKED` |
+| `actual` | 寫入 TestRail 的執行結果文字 |
+| `attachments` | 截圖或影片路徑 list，不附檔傳 `[]`。圖片內嵌到步驟，其他檔案掛在整筆 result |
 
-完整用法可參考 [TEST/test_case_example_multi_step.py](TEST/test_case_example_multi_step.py)。
+完整用法見 [tests/test_case_example_multi_step.py](tests/test_case_example_multi_step.py)。
 
-## Playwright Codegen
-
-錄製操作產生 selector：
+### 產生 selector
 
 ```powershell
 .\.venv\Scripts\playwright.exe codegen --viewport-size="1920,1080" "https://example.com/login"
 ```
 
+---
+
 ## CI
 
-[.gitlab-ci.yml](.gitlab-ci.yml) 提供 GitLab CI 參考範例，只在 schedule 或手動觸發時執行。
-（本範本託管於 GitHub，這份設定保留作為 GitLab runner 的寫法參考。）
+兩個平台的 CI 設定檔**互不相通**，本專案兩份都提供：
 
-**所有憑證都要放在 Settings > CI/CD > Variables 並勾選 Masked / Protected，不要寫進 yml。**
-需要建立的變數清單寫在 `.gitlab-ci.yml` 的註解裡。
+| | [GitHub Actions](.github/workflows/e2e.yml) | [GitLab CI](.gitlab-ci.yml) |
+| --- | --- | --- |
+| 設定檔位置 | `.github/workflows/*.yml` | `.gitlab-ci.yml`（根目錄） |
+| 機密存放 | Settings → Secrets and variables → Actions | Settings → CI/CD → Variables（勾 Masked） |
+| 快取 | `actions/cache` | `cache:` 關鍵字 |
+| 產物 | `actions/upload-artifact` | `artifacts:` |
+| 本專案狀態 | **實際執行** | 參考範例，GitHub 不會執行 |
 
-CI 流程：
+兩者流程相同：安裝依賴 → 安裝 Chromium → `xvfb-run` 執行（headed 模式需要虛擬顯示器）
+→ 保存 `IMG/` 產物。
 
-1. 安裝 Python dependencies
-2. 安裝 Playwright Chromium
-3. 以 `xvfb-run` 執行 `python run_qa_tests.py`（headed 模式需要虛擬顯示器）
-4. 保存 `IMG/` 截圖 artifact
+**憑證一律走平台的機密管理，不要寫進 yml。** 需要建立的變數清單寫在各設定檔的註解裡。
+
+---
 
 ## 常見問題
 
@@ -218,17 +367,25 @@ BrowserType.launch: Executable doesn't exist
 ### `Missing environment variable: TESTRAIL_URL`
 
 `.env` 沒建立或沒填 TestRail 連線資訊。本機只想跑流程不回報時，
-可以用 `--dry-run` 或設 `TESTRAIL_REPORT_ENABLED=false`。
+用 `--dry-run` 或設 `TESTRAIL_REPORT_ENABLED=false`。
 
 ### `TEST_RUN_ID = 0` 無法回報 TestRail
 
-不是 dry-run 時 `run_step_case()` 需要有效的 run id。解法：
+不是 dry-run 時需要有效的 run id。解法：改案例的 `TEST_RUN_ID`、
+執行時加 `--run-id <id>`、或本機驗證時用 `--dry-run`。
 
-- 把 testcase 的 `TEST_RUN_ID` 改成實際 run id
-- 或執行時加 `--run-id <id>`
-- 或本機驗證時使用 `--dry-run` / `TESTRAIL_REPORT_ENABLED=false`
+### `RUN_TIMEZONE` 設了卻沒作用
+
+Windows 與精簡版 Linux 映像沒有內建 IANA 時區資料庫。`requirements.txt` 已包含
+`tzdata` 套件，確認它有裝好；無法解析時會印出警告並退回 UTC，不會中斷執行。
 
 ### 修改 `.env` 後沒有生效
 
-`.env` 只在該 key 尚未存在於環境變數時才載入（讓 CI variables 優先）。
-修改後請重新執行測試程式。
+`.env` 只在該 key 尚未存在於環境變數時才載入（讓 CI Variables 優先）。
+修改後請重新執行。
+
+---
+
+## License
+
+[MIT](LICENSE)

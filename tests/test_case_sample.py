@@ -6,7 +6,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from support.case_runner import run_case
-from support.login import login_backoffice
+from support.login import login
 from testrail_client import PASSED, StepReport
 
 # 需要截圖時：from support.screenshots import save_step_screenshot
@@ -22,10 +22,9 @@ def steps(page, screenshot_dir, step_reports):
     - screenshot_dir：截圖輸出目錄，用 save_step_screenshot(page, screenshot_dir, 步驟, 名稱)
     - step_reports：把每步的 StepReport append 進去（不要 return，中途失敗才留得住已完成結果）
     """
-    login_backoffice(page, "merchant")
-    login_backoffice(page, "platform")
+    login(page, "admin")
     step_reports.append(
-        StepReport(PASSED, "AUTOTEST: passed - backoffice login", [])
+        StepReport(PASSED, "AUTOTEST: passed - login", [])
     )
 
 
