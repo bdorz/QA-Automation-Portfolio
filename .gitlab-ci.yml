@@ -1,0 +1,92 @@
+# =====================================================================
+# GitLab CI 參考範例
+#
+# 這個範本本身放在 GitHub，這份設定保留作為 GitLab runner 的參考寫法：
+# 排程觸發、快取 pip 與 Playwright browser、以 xvfb 跑 headed 模式、
+# 保存截圖 artifact。搬到 GitLab 時可直接沿用。
+#
+# 憑證一律走 Settings > CI/CD > Variables，不要寫進這個檔案（清單見下方）。
+# =====================================================================
+
+stages:
+  - test
+
+default:
+  image: python:3.12
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - .cache/pip
+      - .cache/ms-playwright
+
+  before_script:
+    - python --version
+    - apt-get update
+    - apt-get install -y xauth
+    - pip install --cache-dir "$PIP_CACHE_DIR" --upgrade pip
+    - pip install --cache-dir "$PIP_CACHE_DIR" -r requirements.txt
+    - python -m playwright install --with-deps chromium
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  PLAYWRIGHT_BROWSERS_PATH: "$CI_PROJECT_DIR/.cache/ms-playwright"
+  PYTHONUNBUFFERED: "1"
+  TZ: "Asia/Taipei"
+
+  # ---------------------------------------------------------------------
+  # 執行設定：可以直接寫在這裡，不含機敏資料。
+  # ---------------------------------------------------------------------
+  TESTRAIL_PROJECT_ID: "1"
+  TESTRAIL_RUN_MODE: "3"
+  TESTRAIL_VERBOSE: "true"
+  TESTRAIL_REPORT_ENABLED: "true"
+  SLACK_NOTIFY_ENABLED: "true"
+  TESTRAIL_RECORD_VIDEO: "true"
+
+  # ---------------------------------------------------------------------
+  # 以下變數「不要」寫在這個檔案裡，請到
+  # Settings > CI/CD > Variables 建立，並勾選 Masked / Protected：
+  #
+  #   TESTRAIL_URL              例：https://your-org.testrail.io/
+  #   TESTRAIL_USER             TestRail 帳號 email
+  #   TESTRAIL_API_KEY          TestRail API key
+  #   SLACK_WEBHOOK_URL         Slack Incoming Webhook
+  #   SLACK_BOT_TOKEN           Slack Bot Token（xoxb-...）
+  #   SLACK_CHANNEL_ID          Slack 頻道 ID
+  #
+  #   platform_QA_LOGIN_URL     以下為受測站台登入資料，QA / STAGE 各一組
+  #   platform_QA_ACCOUNT
+  #   platform_QA_PASSWORD
+  #   merchant_QA_LOGIN_URL
+  #   merchant_QA_NAME
+  #   merchant_QA_ACCOUNT
+  #   merchant_QA_PASSWORD
+  #   platform_STAGE_LOGIN_URL
+  #   platform_STAGE_ACCOUNT
+  #   platform_STAGE_PASSWORD
+  #   merchant_STAGE_LOGIN_URL
+  #   merchant_STAGE_NAME
+  #   merchant_STAGE_ACCOUNT
+  #   merchant_STAGE_PASSWORD
+  # ---------------------------------------------------------------------
+
+run-automation:
+  stage: test
+  variables:
+    # 0/QA 或 1/STAGE，決定使用哪一組登入資料
+    ADMIN_ENV_MODE: "1"
+    # 要執行的 testcase，可填 CASE_ID、TEST_RUN_ID 或檔名
+    TESTRAIL_DAILY_TESTS: '["test_case_sample"]'
+  script:
+    # xvfb-run 讓 headed 模式可以在無桌面的 CI runner 上執行
+    - xvfb-run -a python run_qa_tests.py --name "Daily Auto Check - $(date '+%Y-%m-%d %H:%M')"
+  artifacts:
+    when: always
+    expire_in: 7 days
+    paths:
+      - IMG/
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - when: never
+  allow_failure: false
