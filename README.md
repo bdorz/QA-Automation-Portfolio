@@ -142,7 +142,7 @@ def steps(page, screenshot_dir, step_reports):
 | `support/login.py` | 登入流程；需依站台調整的 selector 集中在檔案開頭。 |
 | `support/test_env.py` | 依 `TEST_ENV` 解析各角色的登入資料。 |
 | `support/screenshots.py` | 截圖路徑建立與保存。 |
-| `.github/workflows/e2e.yml` | GitHub Actions：排程與手動觸發。 |
+| `examples/ci/github-actions-e2e.yml.example` | GitHub Actions 展示範例；不會被 GitHub 載入或執行。 |
 | `.gitlab-ci.yml` | GitLab CI 參考範例（本專案託管於 GitHub，此檔不會被執行）。 |
 | `IMG/` | 截圖與錄影輸出（執行時自動產生，已 gitignore）。 |
 
@@ -337,22 +337,24 @@ if __name__ == "__main__":
 
 ## CI
 
-兩個平台的 CI 設定檔**互不相通**，本專案兩份都提供：
+本專案目前是作品展示用途，**沒有啟用 GitHub Actions**，不會定時或手動執行線上測試。
+CI 設計仍以不會被 GitHub 載入的範例檔保留：
 
-| | [GitHub Actions](.github/workflows/e2e.yml) | [GitLab CI](.gitlab-ci.yml) |
+| | [GitHub Actions 範例](examples/ci/github-actions-e2e.yml.example) | [GitLab CI 範例](.gitlab-ci.yml) |
 | --- | --- | --- |
-| 設定檔位置 | `.github/workflows/*.yml` | `.gitlab-ci.yml`（根目錄） |
+| 設定檔位置 | `examples/ci/*.example` | `.gitlab-ci.yml`（根目錄） |
 | 機密存放 | Settings → Secrets and variables → Actions | Settings → CI/CD → Variables（勾 Masked） |
 | 快取 | `actions/cache` action | `cache:` 關鍵字 |
 | 產物 | `actions/upload-artifact` action | `artifacts:` |
-| 本專案狀態 | **實際執行** | 參考範例，GitHub 不會讀取 |
+| 本專案狀態 | 展示範例，**不會執行** | 參考範例，GitHub 不會讀取 |
 
 兩者流程相同：安裝依賴 → 安裝 Chromium → `xvfb-run` 執行 → 保存 `IMG/` 產物。
 **憑證一律走平台的機密管理，不要寫進 yml。**
 
 ### GitHub Actions
 
-[.github/workflows/e2e.yml](.github/workflows/e2e.yml) 在每日排程與手動觸發時執行：
+[examples/ci/github-actions-e2e.yml.example](examples/ci/github-actions-e2e.yml.example)
+展示每日排程與手動觸發的完整設計，但因為不在 `.github/workflows/` 目錄內，GitHub 不會識別或執行它。範例流程為：
 
 1. 安裝依賴（pip 快取）
 2. 安裝 Chromium，瀏覽器本體另外快取 —— 約 115 MB，不快取的話每次執行都要重新下載
@@ -361,7 +363,7 @@ if __name__ == "__main__":
 
 第 4 步用 `if: always()` —— 失敗時的截圖正是最需要看的東西，不能因為前一步失敗就不上傳。
 
-手動觸發（Actions → E2E Tests → Run workflow）可以選擇測試環境與要執行的案例。
+若日後將範例移回 `.github/workflows/e2e.yml` 啟用，手動觸發時可以選擇測試環境與要執行的案例。
 同一分支重複觸發時，`concurrency` 會取消還在跑的舊 job，避免兩份測試同時打同一個站台。
 
 測試失敗時 `run_qa_tests.py` 會以非零 exit code 結束，job 因此正確標記為紅燈。

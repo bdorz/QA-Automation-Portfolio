@@ -1,16 +1,16 @@
 # =====================================================================
-# GitHub Actions：排定時間與手動觸發的 E2E 測試
+# 展示用途的 GitHub Actions E2E 設定範例
 #
-# 憑證放在 Settings > Secrets and variables > Actions：
-#   Secrets（加密，log 中會被遮蔽）
-#     TESTRAIL_URL / TESTRAIL_USER / TESTRAIL_API_KEY
-#     SLACK_WEBHOOK_URL / SLACK_BOT_TOKEN / SLACK_CHANNEL_ID
-#     ADMIN_STAGE_LOGIN_URL / ADMIN_STAGE_USERNAME / ADMIN_STAGE_PASSWORD
-#   Variables（非機密，可直接在此檔覆寫）
-#     TESTRAIL_PROJECT_ID
+# 此檔案刻意放在 .github/workflows/ 之外，且使用 .example 副檔名，
+# 因此 GitHub 不會載入或執行。若要在其他專案啟用，請移到
+# .github/workflows/e2e.yml，再設定下列 Secrets 與 Variables。
 #
-# 注意：Pull Request 來自 fork 時讀不到 secrets，這也是本工作流程
-# 不掛在 pull_request 事件上的原因。
+# Secrets：
+#   TESTRAIL_URL / TESTRAIL_USER / TESTRAIL_API_KEY
+#   SLACK_WEBHOOK_URL / SLACK_BOT_TOKEN / SLACK_CHANNEL_ID
+#   ADMIN_STAGE_LOGIN_URL / ADMIN_STAGE_USERNAME / ADMIN_STAGE_PASSWORD
+# Variables：
+#   TESTRAIL_PROJECT_ID
 # =====================================================================
 
 name: E2E Tests
